@@ -16,8 +16,10 @@
  * The Software is provided WITHOUT ANY WARRANTY, EXPRESS OR IMPLIED. This
  * notice is a summary of the Click LICENSE file; the license in that file is
  * legally binding.
+
  */
 
+#include <unistd.h>
 #include <click/config.h>
 
 #include <click/args.hh>
@@ -49,6 +51,10 @@ CLICK_DECLS
 
 #define LOAD_UNIT 10
 
+static inline void hr_sleep(long time){
+	asm("mov %%rbx, %%rdi ; syscall " :  : "a" ((unsigned long)(134)) , "b" (time));
+}
+
 FromDPDKDevice::FromDPDKDevice() :
     _dev(0), _tco(false), _uco(false), _ipco(false)
 #if HAVE_DPDK_INTERRUPT
@@ -66,8 +72,7 @@ FromDPDKDevice::~FromDPDKDevice()
 {
 }
 
-int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
-{
+int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
     //Default parameters
     int numa_node = 0;
     int minqueues = 1;
@@ -121,6 +126,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
         .read_or_set("PAINT_QUEUE", _set_paint_anno, false)
         .read_or_set("BURST", _burst, 32)
         .read_or_set("CLEAR", _clear, false)
+        .read_or_set("SLEEP_MODE", sleep_mode, "no_sleep")
+	.read_or_set("DELTA", delta_sleep, 2)
         .read("PAUSE", fc_mode)
 #if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
         .read("IPCO", _ipco)
@@ -129,7 +136,6 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 #endif
         .complete() < 0)
         return -1;
-
     if (!DPDKDeviceArg::parse(dev, _dev)) {
         if (allow_nonexistent)
             return 0;
@@ -213,8 +219,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 #else
     r = _dev->set_mode(mode, num_pools, vf_vlan, errh);
 #endif
-
     return r;
+
 }
 
 #if HAVE_DPDK_READ_CLOCK
@@ -236,6 +242,7 @@ struct UserClockSource dpdk_clock {
 #endif
 
 void* FromDPDKDevice::cast(const char* name) {
+	printf("CAST");
 #if HAVE_DPDK_READ_CLOCK
     if (String(name) == "UserClockSource")
         return &dpdk_clock;
@@ -247,10 +254,9 @@ void* FromDPDKDevice::cast(const char* name) {
     return RXQueueDevice::cast(name);
 }
 
-int FromDPDKDevice::initialize(ErrorHandler *errh)
-{
+int FromDPDKDevice::initialize(ErrorHandler *errh) {
     int ret;
-
+	printf("INITIALIZE");
     if (!_dev)
         return 0;
 
@@ -363,35 +369,61 @@ FromDPDKDevice::_run_task(int iqueue)
 #endif
 
 #ifdef DPDK_USE_XCHG
- unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
+		unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
 #else
- unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
+		unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
 #endif
+	if (n == 0)
+	{
+		if (sleep_mode=="u_fois" || sleep_mode=="hr_fois") {
+		// Gestion du facteur multiplicatif
+			time_sleep[iqueue] = time_sleep[iqueue] * delta_sleep;
+		}
+		if (sleep_mode=="u_plus" || sleep_mode=="hr_plus") { 
+		// Gestion du facteur additif
+			time_sleep[iqueue] = time_sleep[iqueue] + delta_sleep;
+		}
+		if (sleep_mode=="u_plus" || sleep_mode=="u_fois") {
+		// Utilisation du sleep de linux
+			usleep(time_sleep[iqueue]);
+		}
+		if (sleep_mode=="hr_plus" || sleep_mode=="hr_fois") {
+		// Utilisation du sleep de Metronome 
+			hr_sleep(time_sleep[iqueue]);
+		}
+		if (sleep_mode=="constant") {
+			hr_sleep(delta_sleep);
+		}
+	}
+	else {
+	// Remise à zéro du temps de sleep
+		time_sleep[iqueue]=2;
+	}
 
-for (unsigned i = 0; i < n; ++i) {
-    unsigned char *data = rte_pktmbuf_mtod(pkts[i], unsigned char *);
-    rte_prefetch0(data);
+	for (unsigned i = 0; i < n; ++i) {
+		unsigned char *data = rte_pktmbuf_mtod(pkts[i], unsigned char *);
+		rte_prefetch0(data);
 #if CLICK_PACKET_USE_DPDK
-    WritablePacket *p = static_cast<WritablePacket *>(Packet::make(pkts[i], _clear));
+    	WritablePacket *p = static_cast<WritablePacket *>(Packet::make(pkts[i], _clear));
 #elif HAVE_ZEROCOPY
 
 # if CLICK_PACKET_INSIDE_DPDK
-    WritablePacket *p =(WritablePacket*)( pkts[i] + 1);
-    new (p) WritablePacket();
+		WritablePacket *p =(WritablePacket*)( pkts[i] + 1);
+		new (p) WritablePacket();
 
-    p->initialize(_clear);
-    p->set_buffer((unsigned char*)(pkts[i]->buf_addr), DPDKDevice::MBUF_DATA_SIZE);
-    p->set_data(data);
-    p->set_data_length(rte_pktmbuf_data_len(pkts[i]));
-    p->set_buffer_destructor(DPDKDevice::free_pkt);
+		p->initialize(_clear);
+		p->set_buffer((unsigned char*)(pkts[i]->buf_addr), DPDKDevice::MBUF_DATA_SIZE);
+		p->set_data(data);
+		p->set_data_length(rte_pktmbuf_data_len(pkts[i]));
+		p->set_buffer_destructor(DPDKDevice::free_pkt);
 
-    p->set_destructor_argument(pkts[i]);
+		p->set_destructor_argument(pkts[i]);
 # else
-    WritablePacket *p = Packet::make(
-        data, rte_pktmbuf_data_len(pkts[i]), DPDKDevice::free_pkt, pkts[i],
-        rte_pktmbuf_headroom(pkts[i]), rte_pktmbuf_tailroom(pkts[i]), _clear);
+		WritablePacket *p = Packet::make(
+		    data, rte_pktmbuf_data_len(pkts[i]), DPDKDevice::free_pkt, pkts[i],
+		    rte_pktmbuf_headroom(pkts[i]), rte_pktmbuf_tailroom(pkts[i]), _clear);
 # endif
-#else //!HAVE_ZEROCOPY
+#else //!HAVE_ZEROCOPY && !CLICK_PACKET_USE_DPDK
             WritablePacket *p = Packet::make(data,
                                      (uint32_t)rte_pktmbuf_pkt_len(pkts[i]));
             rte_pktmbuf_free(pkts[i]);

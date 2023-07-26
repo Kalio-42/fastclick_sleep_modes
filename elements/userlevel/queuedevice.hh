@@ -266,7 +266,9 @@ protected:
     bool _use_numa;
     int _numa_node_override;
     bool _scale_parallel;
-
+    String sleep_mode="no_sleep";
+    int delta_sleep=2;  // temps à ajouter ou facteur multiplicateur de time_sleep suivant le mode
+    int time_sleep[24]={0}; // temps de sleep dynamique ; par défaut je suis obligé de définir la taille du tableau, je met donc à 24 qui est supérieur à nos tests, mais il faut augmenter la taille si l'on active plus de coeurs.
     /**
      * Common parsing for all RXQueueDevice
      */
