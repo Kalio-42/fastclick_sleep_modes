@@ -463,6 +463,7 @@ protected:
     class FDState { public:
         FDState() : mustresched(0) {};
         int mustresched;
+
     };
     per_thread<FDState> _fdstate;
 #endif
@@ -471,6 +472,16 @@ protected:
     bool _uco;
     bool _ipco;
     bool _clear;
+#define SLEEP_ADD 1
+#define SLEEP_MULT 2
+#define SLEEP_HR 4
+#define SLEEP_U 8
+#define SLEEP_CST 16
+
+    unsigned _sleep_mode;
+    unsigned _sleep_delta;
+    unsigned _sleep_reset;
+    int time_sleep[24]={0}; // temps de sleep dynamique ; par défaut je suis obligé de définir la taille du tableau, je met donc à 24 qui est supérieur à nos tests, mais il faut augmenter la taille si l'on active plus de coeurs.
 };
 
 CLICK_ENDDECLS

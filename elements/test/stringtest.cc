@@ -74,6 +74,9 @@ StringTest::initialize(ErrorHandler *errh)
     n = sprintf(buf, "%d", 0);
     CHECK(StringRef(buf,n) == "0");
 
+    s = String("HELLO YOU !");
+    CHECK(s.starts_with("HELLO"));
+    CHECK(s.ends_with("YOU !"));
 
     if (!errh->nerrors()) {
     	errh->message("All tests pass!");

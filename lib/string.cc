@@ -1035,6 +1035,21 @@ String::starts_with(const char *s, int len) const
     return length() >= len && (data() == s || memcmp(data(), s, len) == 0);
 }
 
+/** @brief Return true iff this string ends with the data in @a s.
+    @param s string data to compare to
+    @param len length of @a s
+
+    If @a len @< 0, then treats @a s as a null-terminated C string.
+
+    @sa String::compare(const String &a, const String &b) */
+bool
+String::ends_with(const char *s, int len) const
+{
+    // See note on equals() re: "out-of-memory" strings.
+    if (len < 0)
+        len = strlen(s);
+    return length() >= len && (data() == s || memcmp(data() + length() - len, s, len) == 0);
+}
 /** @brief Compare this string with the data in @a s.
     @param s string data to compare to
     @param len length of @a s

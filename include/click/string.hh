@@ -117,6 +117,8 @@ class String { public:
     int compare(const char *s, int len) const;
     inline bool starts_with(const String &x) const;
     bool starts_with(const char *s, int len) const;
+    inline bool ends_with(const String &x) const;
+    bool ends_with(const char *s, int len) const;
     bool glob_match(const String& pattern) const;
 
     // bool operator==(const String &, const String &);
@@ -695,6 +697,13 @@ inline int String::compare(const String &x) const {
     Same as String::starts_with(@a x.data(), @a x.length()). */
 inline bool String::starts_with(const String &x) const {
     return starts_with(x.data(), x.length());
+}
+
+/** @brief Test if this string ends with suffix @a x.
+
+    Same as String::ends_with(@a x.data(), @a x.length()). */
+inline bool String::ends_with(const String &x) const {
+    return ends_with(x.data(), x.length());
 }
 
 /** @brief Assign this string to @a x. */

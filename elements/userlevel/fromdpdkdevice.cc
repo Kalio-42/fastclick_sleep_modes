@@ -92,6 +92,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
     bool has_rss = false;
     bool has_reta_size;
     bool flow_isolate = false;
+    unsigned sleep_delta;
+    String sleep_mode;
 #if HAVE_FLOW_API
     String flow_rules_filename;
 #endif
@@ -127,7 +129,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         .read_or_set("BURST", _burst, 32)
         .read_or_set("CLEAR", _clear, false)
         .read_or_set("SLEEP_MODE", sleep_mode, "no_sleep")
-	.read_or_set("DELTA", delta_sleep, 2)
+	.read_or_set("SLEEP_DELTA", sleep_delta, 2)
         .read("PAUSE", fc_mode)
 #if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
         .read("IPCO", _ipco)
@@ -136,11 +138,34 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
 #endif
         .complete() < 0)
         return -1;
+
     if (!DPDKDeviceArg::parse(dev, _dev)) {
         if (allow_nonexistent)
             return 0;
         else
             return errh->error("%s: Unknown or invalid PORT", dev.c_str());
+    }
+
+    _sleep_mode = 0;
+    if (sleep_mode != "no_sleep") {
+        if (sleep_mode == "hr_fois" || sleep_mode == "u_fois") {
+            _sleep_mode |= SLEEP_MULT;
+        } else if (sleep_mode == "hr_plus" || sleep_mode == "u_plus") {
+            _sleep_mode |= SLEEP_ADD;
+        } else if (sleep_mode.ends_with("constant")) {
+            _sleep_mode = SLEEP_CST;
+        } else {
+            return errh->error("Unknown mode %s", sleep_mode.c_str());
+        }
+
+        if (sleep_mode.starts_with("hr"))
+            _sleep_mode |= SLEEP_HR;
+        if (sleep_mode.starts_with("u"))
+            _sleep_mode |= SLEEP_U;
+
+        _sleep_delta = sleep_delta;
+        _sleep_reset = sleep_delta;
+        click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
     }
 
     if (_use_numa) {
@@ -373,31 +398,28 @@ FromDPDKDevice::_run_task(int iqueue)
 #else
 		unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
 #endif
-	if (n == 0)
+	if (unlikely(n == 0))
 	{
-		if (sleep_mode=="u_fois" || sleep_mode=="hr_fois") {
-		// Gestion du facteur multiplicatif
-			time_sleep[iqueue] = time_sleep[iqueue] * delta_sleep;
-		}
-		if (sleep_mode=="u_plus" || sleep_mode=="hr_plus") { 
-		// Gestion du facteur additif
-			time_sleep[iqueue] = time_sleep[iqueue] + delta_sleep;
-		}
-		if (sleep_mode=="u_plus" || sleep_mode=="u_fois") {
-		// Utilisation du sleep de linux
-			usleep(time_sleep[iqueue]);
-		}
-		if (sleep_mode=="hr_plus" || sleep_mode=="hr_fois") {
-		// Utilisation du sleep de Metronome 
-			hr_sleep(time_sleep[iqueue]);
-		}
-		if (sleep_mode=="constant") {
-			hr_sleep(delta_sleep);
-		}
+        if (_sleep_mode) {
+            if (_sleep_mode & SLEEP_MULT) {
+            // Gestion du facteur multiplicatif
+                time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
+            } else if (_sleep_mode & SLEEP_ADD) {
+                time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
+            }
+
+            if (_sleep_mode & SLEEP_U) {
+                // Utilisation du sleep de linux
+                usleep(time_sleep[iqueue]);
+            } else if (_sleep_mode & SLEEP_HR) {
+                // Utilisation du sleep de Metronome
+                hr_sleep(time_sleep[iqueue] * 1000);
+            }
+        }
 	}
 	else {
 	// Remise à zéro du temps de sleep
-		time_sleep[iqueue]=2;
+		time_sleep[iqueue]=_sleep_reset;
 	}
 
 	for (unsigned i = 0; i < n; ++i) {
