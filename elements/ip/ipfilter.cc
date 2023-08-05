@@ -1492,7 +1492,27 @@ IPFilter::push_batch(int, PacketBatch *batch)
 void
 IPFilter::push(int, Packet *p)
 {
-    checked_output_push(match(_zprog, p), p);
+    checked_output_push(match(p), p);
+}
+
+#if HAVE_BATCH
+void
+IPFilterIMP::push_batch(int, PacketBatch *batch)
+{
+    CLASSIFY_EACH_PACKET(
+        (noutputs() + 1),
+        match_packet,
+        batch,
+        checked_output_push_batch
+    );
+
+}
+#endif
+
+void
+IPFilterIMP::push(int, Packet *p)
+{
+    checked_output_push(match_packet(p), p);
 }
 
 CLICK_ENDDECLS

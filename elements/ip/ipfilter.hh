@@ -182,8 +182,6 @@ class IPFilter : public BatchElement { public:
     static void parse_program(IPFilterProgram &zprog,
                   const Vector<String> &conf, int noutputs,
                   const Element *context, ErrorHandler *errh);
-    inline int match(const IPFilterProgram &zprog, const Packet *p);
-    inline int match(Packet *p);
 
     enum {
         TYPE_NONE   = 0,        // data types
@@ -320,7 +318,12 @@ class IPFilter : public BatchElement { public:
 
     IPFilterProgram _zprog;
     bool _caching;
+
     IPFilterCache _cache;
+
+    inline int match(const IPFilterProgram &zprog, const Packet *p, IPFilterCache& cache);
+    inline int match(Packet *p);
+
 
     static String read_handler(Element *e, void *thunk);
 
@@ -391,7 +394,7 @@ IPFilter::Primitive::negation_is_simple() const
 }
 
 inline int
-IPFilter::match(const IPFilterProgram &zprog, const Packet *p)
+IPFilter::match(const IPFilterProgram &zprog, const Packet *p, IPFilterCache& cache)
 {
     int packet_length = p->network_length(),
     network_header_length = p->network_header_length();
@@ -402,13 +405,13 @@ IPFilter::match(const IPFilterProgram &zprog, const Packet *p)
 
     if (zprog.output_everything() >= 0) {
         if (_caching) {
-            _cache.cache_misses_nb++;
+            cache.cache_misses_nb++;
         }
         return zprog.output_everything();
     }
     else if (packet_length < (int) zprog.safe_length()) {
         if (_caching) {
-            _cache.cache_misses_nb++;
+            cache.cache_misses_nb++;
         }
         // common case never checks packet length
         return length_checked_match(zprog, p, packet_length);
@@ -416,18 +419,18 @@ IPFilter::match(const IPFilterProgram &zprog, const Packet *p)
 
     // Caching enabled
     if (_caching) {
-        if (_cache.last_flow_id) {
+        if (cache.last_flow_id) {
             // Get the flow ID of this packet
             IPFlow5ID new_flow_id(p);
             // Exploit last output port stored from a previous packet of the same flow
-            if (new_flow_id == *_cache.last_flow_id) {
-                int port = _cache.last_port;
+            if (new_flow_id == *(cache.last_flow_id)) {
+                int port = cache.last_port;
                 assert((port >= 0) && (port < noutputs()));
-                _cache.cache_hits_nb++;
+                cache.cache_hits_nb++;
                 return port;
             }
         }
-        _cache.cache_misses_nb++;
+        cache.cache_misses_nb++;
     }
 
     const unsigned char *neth_data = p->network_header();
@@ -471,8 +474,8 @@ IPFilter::match(const IPFilterProgram &zprog, const Packet *p)
         if (off <= 0) {
             if (_caching) {
                 IPFlow5ID new_flow_id(p);
-                _cache.last_flow_id = &new_flow_id;
-                _cache.last_port = -off;
+                cache.last_flow_id = &new_flow_id;
+                cache.last_port = -off;
             }
             return -off;
         }
@@ -483,8 +486,35 @@ IPFilter::match(const IPFilterProgram &zprog, const Packet *p)
 inline int
 IPFilter::match(Packet *p)
 {
-    return match(_zprog, p);
+    return match(_zprog, p, _cache);
 }
+
+
+class IPFilterIMP : public IPFilter { public:
+
+    IPFilterIMP() CLICK_COLD;
+    ~IPFilterIMP() CLICK_COLD;
+
+    const char *class_name() const override      { return "IPFilterIMP"; }
+
+    inline int match_packet(Packet *p);
+
+private:
+
+    per_thread<IPFilterCache> _cache_mp;
+
+#if HAVE_BATCH
+    void push_batch(int port, PacketBatch *);
+#endif
+    void push(int port, Packet *);
+};
+
+inline int
+IPFilterIMP::match_packet(Packet *p)
+{
+    return match(_zprog, p, *_cache_mp);
+}
+
 
 CLICK_ENDDECLS
 #endif
