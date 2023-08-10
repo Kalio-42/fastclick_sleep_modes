@@ -221,29 +221,18 @@ class SimpleBatchElement : public BatchElement { public:
 };
 
 
-/**
- * Batch helper element.
- *
- * Build an element that implements only simple_action, and
- * which does not call pull or push. Just extend SimpleElement<T> where T
- * is the new element itself.
- * It also avoids the virtual call, so a vanilla element using
- * this version even without batching will run faster.
- *
- * Downside :
- * The inherited element cannot be extended further because of CRTP !
- */
-template <typename T>
-class SimpleElement : public BatchElement { public:
+
+template <typename T, typename Parent>
+class SimpleInheritedElement : public Parent { public:
 
     void push(int port, Packet *p) override {
         p = static_cast<T&>(*this).simple_action(p);
         if (p)
-            output(port).push(p);
+            Parent::output(port).push(p);
     }
 
     Packet* pull(int port) override {
-        Packet *p = input(port).pull();
+        Packet *p = Parent::input(port).pull();
         if (p)
             p = static_cast<T&>(*this).simple_action(p);
         return p;
@@ -253,11 +242,11 @@ class SimpleElement : public BatchElement { public:
     void push_batch(int port, PacketBatch* head) override  {
         head = _sm_action_batch(head);
         if (head)
-            output(port).push_batch(head);
+            Parent::output(port).push_batch(head);
     }
 
-    PacketBatch* pull_batch(int port, unsigned max) override final {
-        PacketBatch* head = input_pull_batch(port,max);
+    PacketBatch* pull_batch(int port, unsigned max) override {
+        PacketBatch* head = Parent::input_pull_batch(port,max);
         if (head)
             head = _sm_action_batch(head);
         return head;
@@ -271,11 +260,25 @@ class SimpleElement : public BatchElement { public:
         return batch;
     }
 
-    SimpleElement(){};
+    SimpleInheritedElement(){};
     friend T;
 
 };
 
+/**
+ * Batch helper element.
+ *
+ * Build an element that implements only simple_action, and
+ * which does not call pull or push. Just extend SimpleElement<T> where T
+ * is the new element itself.
+ * It also avoids the virtual call, so a vanilla element using
+ * this version even without batching will run faster.
+ *
+ * Downside :
+ * The inherited element cannot be extended further because of CRTP !
+ */
+template <typename T>
+using SimpleElement = SimpleInheritedElement<T,BatchElement>;
 
 CLICK_ENDDECLS
 #endif

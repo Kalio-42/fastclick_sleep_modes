@@ -137,6 +137,13 @@ CheckIPHeader::configure(Vector<String> &conf, ErrorHandler *errh)
     }
 #endif
 
+    router()->get_root_init_future()->postOnce(new Router::FctFuture([this](ErrorHandler* errh){
+        if (get_passing_threads().weight() > 1 && class_name() == "CheckIPHeader") {
+            return errh->warning("This element is not optimal for multi-threading. Use CheckIPHeaderIMP instead.");
+        }
+        return 0;
+    },this));
+
     return 0;
 }
 
@@ -221,8 +228,6 @@ inline CheckIPHeader::Reason CheckIPHeader::valid(Packet* p) {
     // reported by Parveen Kumar Patel at Utah -- 4/3/2002
     p->set_dst_ip_anno(ip->ip_dst);
 
-    _count++;
-
     return NREASONS;
 }
 
@@ -231,6 +236,7 @@ CheckIPHeader::simple_action(Packet *p)
 {
     Reason r;
     if ((r = valid(p)) == NREASONS) {
+        _count++;
         return p;
     } else {
         drop(r, p, false);
@@ -275,6 +281,47 @@ CheckIPHeader::add_handlers()
         add_read_handler("drop_details", read_handler, h_drop_details);
 }
 
+
+Packet *
+CheckIPHeaderIMP::simple_action(Packet *p)
+{
+    Reason r;
+    if ((r = valid(p)) == NREASONS) {
+        _state->count++;
+        return p;
+    } else {
+        drop(r, p, false);
+        return NULL;
+    }
+}
+
+String
+CheckIPHeaderIMP::read_handler(Element *e, void *thunk)
+{
+    CheckIPHeaderIMP *c = reinterpret_cast<CheckIPHeaderIMP *>(e);
+
+    switch (reinterpret_cast<uintptr_t>(thunk)) {
+        case h_count: {
+            PER_THREAD_MEMBER_SUM(uint64_t,count,c->_state,count);
+            return String(count);
+        }
+        default: {
+            return CheckIPHeader::read_handler(e,thunk);
+        }
+    }
+}
+
+void
+CheckIPHeaderIMP::add_handlers()
+{
+    add_read_handler("count", read_handler, h_count);
+    add_read_handler("drops", read_handler, h_drops);
+}
+
+
 CLICK_ENDDECLS
 EXPORT_ELEMENT(CheckIPHeader)
 ELEMENT_MT_SAFE(CheckIPHeader)
+
+EXPORT_ELEMENT(CheckIPHeaderIMP)
+ELEMENT_MT_SAFE(CheckIPHeaderIMP)

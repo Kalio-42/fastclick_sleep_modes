@@ -163,6 +163,7 @@ class CheckIPHeader : public SimpleElement<CheckIPHeader> {
 
         static const char * const reason_texts[NREASONS];
 
+    protected:
         enum { h_count, h_drops, h_drop_details };
 
         inline Reason valid(Packet *p);
@@ -170,6 +171,28 @@ class CheckIPHeader : public SimpleElement<CheckIPHeader> {
         static String read_handler(Element *e, void *thunk) CLICK_COLD;
 
         friend class CheckIPHeader2;
+};
+
+class CheckIPHeaderIMP : public SimpleInheritedElement<CheckIPHeaderIMP,CheckIPHeader> {
+    public:
+        const char *class_name() const override { return "CheckIPHeaderIMP"; }
+        const char *port_count() const override { return PORTS_1_1X2; }
+
+
+        Packet *simple_action(Packet *p);
+
+        void add_handlers() CLICK_COLD;
+protected:
+        static String read_handler(Element *e, void *thunk) CLICK_COLD;
+
+        struct state {
+            uint64_t count;
+        };
+
+        per_thread<state> _state;
+
+
+
 };
 
 CLICK_ENDDECLS
