@@ -165,7 +165,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
 
         _sleep_delta = sleep_delta;
         _sleep_reset = sleep_delta;
-        click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
+        // click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
     }
 
     if (_use_numa) {
