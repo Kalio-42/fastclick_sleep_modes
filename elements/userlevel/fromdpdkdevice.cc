@@ -55,6 +55,20 @@ static inline void hr_sleep(long time){
 	asm("mov %%rbx, %%rdi ; syscall " :  : "a" ((unsigned long)(134)) , "b" (time));
 }
 
+static inline int trylock(void * uadr){
+        unsigned long r =0 ;
+        asm volatile(
+                        "xor %%rax,%%rax\n"
+                        "mov $1,%%rbx\n"
+                        "lock cmpxchg %%rbx,(%1)\n"
+                        "sete (%0)\n"
+                        : : "r"(&r),"r" (uadr)
+                        : "%rax","%rbx"
+                    );
+        asm volatile("" ::: "memory");
+        return (r) ? 1 : 0;
+}
+
 FromDPDKDevice::FromDPDKDevice() :
     _dev(0), _tco(false), _uco(false), _ipco(false)
 #if HAVE_DPDK_INTERRUPT
@@ -165,7 +179,13 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
 
         _sleep_delta = sleep_delta;
         _sleep_reset = sleep_delta;
-        click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
+        // If a sleep mode is set, maxqueues and minqueues must be equal
+        if (minqueues != maxqueues) {
+            return errh->error("When using a sleep mode, MINQUEUES and MAXQUEUES must be equal. Metronome synchronisation technique must know exactly how many queues are used.");
+        }
+        _nb_queues = minqueues;
+        _lock = (unsigned long*)malloc(sizeof(unsigned long) * _nb_queues);
+        // click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
     }
 
     if (_use_numa) {
@@ -393,14 +413,34 @@ FromDPDKDevice::_run_task(int iqueue)
   WritablePacket *last;
 #endif
 
+    unsigned n;
+
+    if (!_sleep_mode){
 #ifdef DPDK_USE_XCHG
 		unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
 #else
-		unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
+        unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
 #endif
-	if (unlikely(n == 0))
-	{
-        if (_sleep_mode) {
+    } else {
+        // Loop on each queue to acquire the lock
+        for(uint8_t i = 0; i < _nb_queues; i++) {
+            if (!trylock(&_lock[i]) == 0)
+                continue;
+#ifdef DPDK_USE_XCHG
+            unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, i, (struct xchg**)pkts, _burst);
+#else
+            unsigned n = rte_eth_rx_burst(_dev->port_id, i, pkts, _burst);
+#endif
+            // Release the lock
+            _lock[i] = 0;
+            // If a packet is received, break the loop
+            if (likely(n > 0)) {
+                break;
+            }
+        } 
+
+        if (unlikely(n == 0))
+        {
             if (_sleep_mode & SLEEP_MULT) {
             // Gestion du facteur multiplicatif
                 time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
@@ -415,12 +455,12 @@ FromDPDKDevice::_run_task(int iqueue)
                 // Utilisation du sleep de Metronome
                 hr_sleep(time_sleep[iqueue] * 1000);
             }
-        }
-	}
-	else {
-	// Remise à zéro du temps de sleep
-		time_sleep[iqueue]=_sleep_reset;
-	}
+        } else {
+        // Remise à zéro du temps de sleep
+            time_sleep[iqueue]=_sleep_reset;
+	    }
+    }
+
 
 	for (unsigned i = 0; i < n; ++i) {
 		unsigned char *data = rte_pktmbuf_mtod(pkts[i], unsigned char *);
