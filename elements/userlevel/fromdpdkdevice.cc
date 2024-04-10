@@ -185,6 +185,9 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         }
         _nb_queues = minqueues;
         _lock = (unsigned long*)malloc(sizeof(unsigned long) * _nb_queues);
+        for (int i = 0; i < _nb_queues; i++) {
+            _lock[i] = UNLOCKED;
+        }
         // click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
     }
 
@@ -413,26 +416,27 @@ FromDPDKDevice::_run_task(int iqueue)
   WritablePacket *last;
 #endif
 
-    unsigned n;
+    unsigned n = 0;
 
     if (!_sleep_mode){
 #ifdef DPDK_USE_XCHG
-		unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
+		n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
 #else
-        unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
+        n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
 #endif
     } else {
         // Loop on each queue to acquire the lock
         for(uint8_t i = 0; i < _nb_queues; i++) {
-            if (!trylock(&_lock[i]) == 0)
+            if (!trylock(&_lock[i])){
                 continue;
+            }
 #ifdef DPDK_USE_XCHG
-            unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, i, (struct xchg**)pkts, _burst);
+            n = rte_mlx5_rx_burst_xchg(_dev->port_id, i, (struct xchg**)pkts, _burst);
 #else
-            unsigned n = rte_eth_rx_burst(_dev->port_id, i, pkts, _burst);
+            n = rte_eth_rx_burst(_dev->port_id, i, pkts, _burst);
 #endif
             // Release the lock
-            _lock[i] = 0;
+            _lock[i] = UNLOCKED;
             // If a packet is received, break the loop
             if (likely(n > 0)) {
                 break;

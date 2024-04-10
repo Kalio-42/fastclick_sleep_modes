@@ -477,6 +477,8 @@ protected:
 #define SLEEP_HR 4
 #define SLEEP_U 8
 #define SLEEP_CST 16
+#define LOCKED 1
+#define UNLOCKED 0
 
     unsigned _sleep_mode;
     unsigned _sleep_delta;
