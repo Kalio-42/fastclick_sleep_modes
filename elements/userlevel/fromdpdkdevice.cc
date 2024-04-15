@@ -356,6 +356,7 @@ int FromDPDKDevice::initialize(ErrorHandler *errh) {
     }
 
 #if HAVE_DPDK_INTERRUPT
+    #error "Interrupts are enabled"
     if (_rx_intr >= 0) {
         for (int i = firstqueue; i <= lastqueue; i++) {
             uint64_t data = _dev->port_id << CHAR_BIT | i;
@@ -544,26 +545,26 @@ bool FromDPDKDevice::multi_run_task(Task *t, void* e) {
     }
 
     #if HAVE_DPDK_INTERRUPT
-     if (!ret && _rx_intr >= 0) {
-           for (int iqueue = queue_for_thisthread_begin();
-                iqueue<=queue_for_thisthread_end(); iqueue++) {
-               if (rte_eth_dev_rx_intr_enable(_dev->port_id, iqueue) != 0) {
+     if (!ret && fd->_rx_intr >= 0) {
+           for (int iqueue = fd->queue_for_thisthread_begin();
+                iqueue<=fd->queue_for_thisthread_end(); iqueue++) {
+               if (rte_eth_dev_rx_intr_enable(fd->_dev->port_id, iqueue) != 0) {
                    click_chatter("Could not enable interrupts");
                    t->fast_reschedule();
                    return false;
                }
            }
-           struct rte_epoll_event event[queue_per_threads];
+           struct rte_epoll_event event[fd->queue_per_threads];
            int n, i;
            uint8_t port_id, queue_id;
            void *data;
-           n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, event, queue_per_threads, -1);
+           n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, event, fd->queue_per_threads, -1);
            for (i = 0; i < n; i++) {
                    data = event[i].epdata.data;
                    port_id = ((uintptr_t)data) >> CHAR_BIT;
-                   assert(port_id == _dev->port_id);
+                   assert(port_id == fd->_dev->port_id);
            }
-           this->selected(0, SELECT_READ);
+           fd->selected(0, SELECT_READ);
     }
 #endif
 
