@@ -356,7 +356,6 @@ int FromDPDKDevice::initialize(ErrorHandler *errh) {
     }
 
 #if HAVE_DPDK_INTERRUPT
-    #error "Interrupts are enabled"
     if (_rx_intr >= 0) {
         for (int i = firstqueue; i <= lastqueue; i++) {
             uint64_t data = _dev->port_id << CHAR_BIT | i;
