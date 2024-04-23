@@ -98,6 +98,9 @@ public:
 	        flow_isolate(false),
             vlan_filter(false), vlan_strip(false), vlan_extend(false), vf_vlan(),
             lro(false), jumbo(false)
+#if HAVE_DPDK_INTERRUPT_MODE
+            , rx_intr_enabled(-1)
+#endif
         {
             rx_queues.reserve(128);
             tx_queues.reserve(128);
@@ -160,6 +163,7 @@ public:
         Vector<int> vf_vlan;
         bool lro;
         bool jumbo;
+        uint8_t rx_intr_enabled;
     };
 
 #if HAVE_FLOW_API
@@ -349,11 +353,11 @@ public:
         return _is_initialized;
     }
 
+    struct DevInfo info;
 private:
 
     enum Dir { RX, TX };
 
-    struct DevInfo info;
 
 
     static int get_nb_mbuf(int socket);

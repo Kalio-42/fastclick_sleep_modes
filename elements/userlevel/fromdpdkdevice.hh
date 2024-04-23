@@ -1,6 +1,8 @@
 #ifndef CLICK_FROMDPDKDEVICE_HH
 #define CLICK_FROMDPDKDEVICE_HH
 
+#include <rte_spinlock.h>
+
 #include <click/batchelement.hh>
 #include <click/notifier.hh>
 #include <click/task.hh>
@@ -418,10 +420,6 @@ public:
     void add_handlers() override CLICK_COLD;
     void cleanup(CleanupStage) override CLICK_COLD;
     bool run_task(Task *) override;
-#if HAVE_DPDK_INTERRUPT
-    void selected(int fd, int mask) override;
-#endif
-
     ToDPDKDevice *find_output_element();
 
     void clear_buffers() CLICK_COLD;
@@ -457,16 +455,16 @@ protected:
     static int xstats_handler(int operation, String &input, Element *e,
                               const Handler *handler, ErrorHandler *errh);
 
+    #define NO_ASSIGNED_QUEUE 255
+    bool _process_packets(uint8_t iqueue);
+
     DPDKDevice* _dev;
-#if HAVE_DPDK_INTERRUPT
-    int _rx_intr;
     class FDState { public:
         FDState() : mustresched(0) {};
         int mustresched;
 
     };
     per_thread<FDState> _fdstate;
-#endif
     bool _set_timestamp;
     bool _tco;
     bool _uco;
@@ -477,14 +475,32 @@ protected:
 #define SLEEP_HR 4
 #define SLEEP_U 8
 #define SLEEP_CST 16
+#define SLEEP_INTR 32
+#define SLEEP_POLICY_METRONOME 64
+#define SLEEP_POLICY_POWER 128
 #define LOCKED 1
 #define UNLOCKED 0
+
+void turn_on_off_intr(bool on, uint8_t start_queue, uint8_t end_queue);
+
+#define MINIMUM_SLEEP_TIME  1
+#define SUSPEND_THRESHOLD   300
+#define MIN_ZERO_POLL_COUNT 10
+
+    struct lcore_rx_queue {
+        uint32_t zero_rx_packet_count;
+        uint32_t idle_hint;
+        unsigned long *lock;
+
+    } __rte_cache_aligned;
+
+    struct lcore_rx_queue *_rx_queue;
+    rte_spinlock_t _dev_lock;
 
     unsigned _sleep_mode;
     unsigned _sleep_delta;
     unsigned _sleep_reset;
     unsigned _nb_queues;
-    unsigned long *_lock; 
     int time_sleep[24]={0}; // temps de sleep dynamique ; par défaut je suis obligé de définir la taille du tableau, je met donc à 24 qui est supérieur à nos tests, mais il faut augmenter la taille si l'on active plus de coeurs.
 };
 

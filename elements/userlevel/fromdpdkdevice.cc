@@ -71,9 +71,6 @@ static inline int trylock(void * uadr){
 
 FromDPDKDevice::FromDPDKDevice() :
     _dev(0), _tco(false), _uco(false), _ipco(false)
-#if HAVE_DPDK_INTERRUPT
-    ,_rx_intr(-1)
-#endif
 {
 #if HAVE_BATCH
     in_batch_mode = BATCH_MODE_YES;
@@ -132,9 +129,6 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         .read_all("VF_VLAN", vf_vlan)
         .read("MINQUEUES",minqueues)
         .read("MAXQUEUES",maxqueues)
-#if HAVE_DPDK_INTERRUPT
-        .read("RX_INTR", _rx_intr)
-#endif
         .read("MAX_RSS", max_rss).read_status(has_rss)
         .read("RETA_SIZE", reta_size).read_status(has_reta_size)
         .read("TIMESTAMP", set_timestamp)
@@ -162,20 +156,30 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
 
     _sleep_mode = 0;
     if (sleep_mode != "no_sleep") {
-        if (sleep_mode == "hr_fois" || sleep_mode == "u_fois") {
+        if (sleep_mode.find_left("mult") != -1) {
             _sleep_mode |= SLEEP_MULT;
-        } else if (sleep_mode == "hr_plus" || sleep_mode == "u_plus") {
+        } else if (sleep_mode.find_left("add") != -1) {
             _sleep_mode |= SLEEP_ADD;
-        } else if (sleep_mode.ends_with("constant")) {
-            _sleep_mode = SLEEP_CST;
+        } else if (sleep_mode.find_left("constant") != -1) {
+            _sleep_mode |= SLEEP_CST;
         } else {
             return errh->error("Unknown mode %s", sleep_mode.c_str());
         }
 
-        if (sleep_mode.starts_with("hr"))
+        if (sleep_mode.find_left("hrsleep") != -1)
             _sleep_mode |= SLEEP_HR;
-        if (sleep_mode.starts_with("u"))
+        if (sleep_mode.find_left("nanosleep") != -1)
             _sleep_mode |= SLEEP_U;
+        if (sleep_mode.find_left("intr") != -1) {
+            _sleep_mode |= SLEEP_INTR;
+        }
+        if (sleep_mode.find_left("metronome") != -1) {
+            _sleep_mode |= SLEEP_POLICY_METRONOME;
+        } else if (sleep_mode.find_left("power") != -1) {
+            _sleep_mode |= SLEEP_POLICY_POWER;
+        } else {
+            return errh->error("Unknown policy %s", sleep_mode.c_str());
+        }
 
         _sleep_delta = sleep_delta;
         _sleep_reset = sleep_delta;
@@ -183,11 +187,18 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         if (minqueues != maxqueues) {
             return errh->error("When using a sleep mode, MINQUEUES and MAXQUEUES must be equal. Metronome synchronisation technique must know exactly how many queues are used.");
         }
-        _nb_queues = minqueues;
-        _lock = (unsigned long*)malloc(sizeof(unsigned long) * _nb_queues);
-        for (int i = 0; i < _nb_queues; i++) {
-            _lock[i] = UNLOCKED;
+        // If interrupts are enabled but no sleep mode is set, trigger an error
+        if (_sleep_mode & SLEEP_INTR && !(_sleep_mode & SLEEP_INTR)) {
+            return errh->error("Interrupts are enabled but no sleep mode is set. Please set a sleep mode.");
         }
+        _nb_queues = minqueues;
+        _rx_queue = (struct lcore_rx_queue*)malloc(sizeof(struct lcore_rx_queue) * _nb_queues);
+        for (int i = 0; i < _nb_queues; i++) {
+            _rx_queue[i].zero_rx_packet_count = 0;
+            _rx_queue[i].idle_hint = 0;
+            _rx_queue[i].lock = UNLOCKED;
+        }
+        rte_spinlock_init(&_dev_lock);
         // click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
     }
 
@@ -318,11 +329,7 @@ int FromDPDKDevice::initialize(ErrorHandler *errh) {
     }
 
 
-    if (queue_per_threads > 1
-#if HAVE_DPDK_INTERRUPT
-     || _rx_intr
-#endif
-     )
+    if (queue_per_threads > 1)
         ret = initialize_tasks(_active, errh, multi_run_task);
     else
         ret = initialize_tasks(_active, errh);
@@ -355,22 +362,9 @@ int FromDPDKDevice::initialize(ErrorHandler *errh) {
 #endif
     }
 
-#if HAVE_DPDK_INTERRUPT
-    if (_rx_intr >= 0) {
-        for (int i = firstqueue; i <= lastqueue; i++) {
-            uint64_t data = _dev->port_id << CHAR_BIT | i;
-            ret = rte_eth_dev_rx_intr_ctl_q(_dev->port_id, i,
-                                            RTE_EPOLL_PER_THREAD,
-                                            RTE_INTR_EVENT_ADD,
-                                            (void *)((uintptr_t)data));
-            if (ret != 0) {
-                return errh->error(
-                    "Cannot initialize RX interrupt on this device"
-                );
-            }
-        }
+    if (_sleep_mode & SLEEP_INTR) {
+        _dev->info.rx_intr_enabled = 1;
     }
-#endif
 
     return ret;
 }
@@ -416,54 +410,11 @@ FromDPDKDevice::_run_task(int iqueue)
   WritablePacket *last;
 #endif
 
-    unsigned n = 0;
-
-    if (!_sleep_mode){
 #ifdef DPDK_USE_XCHG
-		n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
+		unsigned n = rte_mlx5_rx_burst_xchg(_dev->port_id, iqueue, (struct xchg**)pkts, _burst);
 #else
-        n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
+        unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
 #endif
-    } else {
-        // Loop on each queue to acquire the lock
-        for(uint8_t i = 0; i < _nb_queues; i++) {
-            if (!trylock(&_lock[i])){
-                continue;
-            }
-#ifdef DPDK_USE_XCHG
-            n = rte_mlx5_rx_burst_xchg(_dev->port_id, i, (struct xchg**)pkts, _burst);
-#else
-            n = rte_eth_rx_burst(_dev->port_id, i, pkts, _burst);
-#endif
-            // Release the lock
-            _lock[i] = UNLOCKED;
-            // If a packet is received, break the loop
-            if (likely(n > 0)) {
-                break;
-            }
-        } 
-
-        if (unlikely(n == 0))
-        {
-            if (_sleep_mode & SLEEP_MULT) {
-            // Gestion du facteur multiplicatif
-                time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
-            } else if (_sleep_mode & SLEEP_ADD) {
-                time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
-            }
-
-            if (_sleep_mode & SLEEP_U) {
-                // Utilisation du sleep de linux
-                usleep(time_sleep[iqueue]);
-            } else if (_sleep_mode & SLEEP_HR) {
-                // Utilisation du sleep de Metronome
-                hr_sleep(time_sleep[iqueue] * 1000);
-            }
-        } else {
-        // Remise à zéro du temps de sleep
-            time_sleep[iqueue]=_sleep_reset;
-	    }
-    }
 
 
 	for (unsigned i = 0; i < n; ++i) {
@@ -535,37 +486,184 @@ FromDPDKDevice::_run_task(int iqueue)
     return n;
 }
 
+
+void FromDPDKDevice::turn_on_off_intr(bool on, uint8_t start_queue, uint8_t end_queue)
+{
+	for (uint8_t i = start_queue; i < end_queue; ++i) {
+
+		rte_spinlock_lock(&_dev_lock);
+		if (on)
+			rte_eth_dev_rx_intr_enable(_dev->port_id, i);
+		else
+			rte_eth_dev_rx_intr_disable(_dev->port_id, i);
+		rte_spinlock_unlock(&_dev_lock);
+	}
+}
+
+static int sleep_until_rx_interrupt(int num, int lcore) {
+	/*
+	 * we want to track when we are woken up by traffic so that we can go
+	 * back to sleep again without log spamming. Avoid cache line sharing
+	 * to prevent threads stepping on each others' toes.
+	 */
+	static struct {
+		bool wakeup;
+	} __rte_cache_aligned status[RTE_MAX_LCORE];
+	struct rte_epoll_event event[num];
+	int n, i;
+	uint16_t port_id;
+	uint8_t queue_id;
+	void *data;
+
+	if (status[lcore].wakeup) {
+		click_chatter("lcore %u sleeps until interrupt triggers\n",
+				rte_lcore_id());
+	}
+
+	n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, event, num, 10);
+	for (i = 0; i < n; i++) {
+		data = event[i].epdata.data;
+		port_id = ((uintptr_t)data) >> CHAR_BIT;
+		queue_id = ((uintptr_t)data) &
+			RTE_LEN2MASK(CHAR_BIT, uint8_t);
+		click_chatter(
+			"lcore %u is waked up from rx interrupt on"
+			" port %d queue %d\n",
+			rte_lcore_id(), port_id, queue_id);
+	}
+	status[lcore].wakeup = n != 0;
+
+	return 0;
+}
+
+static inline uint32_t
+power_idle_heuristic(uint32_t zero_rx_packet_count)
+{
+	/* If zero count is less than 100,  sleep 1us */
+	if (zero_rx_packet_count < SUSPEND_THRESHOLD)
+		return MINIMUM_SLEEP_TIME;
+	/* If zero count is less than 1000, sleep 100 us which is the
+		minimum latency switching from C3/C6 to C0
+	*/
+	else
+		return SUSPEND_THRESHOLD;
+}
+
+bool FromDPDKDevice::_process_packets(uint8_t iqueue){
+    // First, define on which queue we will iterate
+
+    // By default, iterate on a single queue given by iqueue
+    uint8_t start_queue = iqueue;
+    uint8_t end_queue = iqueue;
+    uint8_t lcore_id = rte_lcore_id();
+    // Metronome supposes that all queues are shared by all threads
+    if (_sleep_mode & SLEEP_HR || _sleep_mode & SLEEP_U) {
+        start_queue = 0;
+        end_queue = _nb_queues - 1;
+    } else if (iqueue == NO_ASSIGNED_QUEUE){
+    // If no specific queue was assigned, run on dev interval
+        start_queue = queue_for_thisthread_begin();
+        end_queue = queue_for_thisthread_end();
+    }
+
+    // If no sleep mode was set, do classical processing
+    if (!_sleep_mode) {
+        bool ret = false;
+        for (int queue = start_queue; queue <= end_queue; queue++) {
+            ret |= _run_task(queue);
+        }
+        return ret;
+    } else if (_sleep_mode & SLEEP_POLICY_METRONOME){    
+    // Metronome default processing
+        uint8_t n = 0;
+        for(uint8_t i = start_queue; i <= end_queue; i++) {
+            if (!trylock(&_rx_queue[end_queue - start_queue].lock)){
+                continue;
+            }
+            n += _run_task(i);
+            // Release the lock
+            _rx_queue[end_queue - start_queue].lock = UNLOCKED;
+        } 
+
+        if (unlikely(n == 0))
+        {
+            if (_sleep_mode & SLEEP_MULT) {
+            // Gestion du facteur multiplicatif
+                time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
+            } else if (_sleep_mode & SLEEP_ADD) {
+                time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
+            }
+
+            // When the sleep time reaches a threshold, switch to interrupt mode
+            if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] > SUSPEND_THRESHOLD) {
+                // Triggers interrupts waiting
+                turn_on_off_intr(true, start_queue, end_queue);
+                sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
+                turn_on_off_intr(false, start_queue, end_queue);
+            } else if (_sleep_mode & SLEEP_U) {
+                // Utilisation du sleep de linux
+                usleep(time_sleep[iqueue]);
+            } else if (_sleep_mode & SLEEP_HR) {
+                // Utilisation du sleep de Metronome
+                hr_sleep(time_sleep[iqueue] * 1000);
+            }
+        } else {
+        // Remise à zéro du temps de sleep
+            time_sleep[iqueue]=_sleep_reset;
+	    }
+        return n;
+    } else if (_sleep_mode & SLEEP_POLICY_POWER){
+    // Implements DPDK l3fwd-power example heuristics
+        uint8_t total_rx = 0;
+        for(uint8_t i = start_queue; i <= end_queue; i++) {
+            uint8_t n = _run_task(i);
+            _rx_queue[end_queue - start_queue].idle_hint = 0;
+            total_rx += n;
+            if (unlikely(n == 0)){
+                _rx_queue[end_queue - start_queue].zero_rx_packet_count++;
+                if (_rx_queue[end_queue - start_queue].zero_rx_packet_count <=
+						MIN_ZERO_POLL_COUNT)
+					continue;
+                _rx_queue[end_queue - start_queue].idle_hint = power_idle_heuristic(
+						_rx_queue[end_queue - start_queue].zero_rx_packet_count);
+            } else {
+                _rx_queue[end_queue - start_queue].zero_rx_packet_count = 0;
+            }
+        }
+        // If there weren't any packets on any queue
+        if(unlikely(total_rx == 0)){
+            // Collect minimal waiting time for conservative sleeping
+            uint32_t min_idle_hint = UINT32_MAX;
+            for(uint8_t i = start_queue; i <= end_queue; i++) {
+                if (_rx_queue[end_queue - start_queue].idle_hint < min_idle_hint)
+                    min_idle_hint = _rx_queue[end_queue - start_queue].idle_hint;
+            }
+            // Over a threshold, rely on interrupts instead of sleeping
+            if (min_idle_hint > SUSPEND_THRESHOLD) {
+                turn_on_off_intr(true, start_queue, end_queue);
+                sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
+                turn_on_off_intr(false, start_queue, end_queue);
+            } else if (_sleep_mode & SLEEP_U) {
+                // Utilisation du sleep de linux
+                usleep(time_sleep[iqueue]);
+            } else if (_sleep_mode & SLEEP_HR) {
+                // Utilisation du sleep de Metronome
+                hr_sleep(time_sleep[iqueue] * 1000);
+            }
+        }
+        return total_rx;
+    } else {
+        // This should not happened
+        click_chatter("Unknown policy for sleep mode");
+        return false;
+    }
+}
+
 bool FromDPDKDevice::multi_run_task(Task *t, void* e) {
     FromDPDKDevice* fd = static_cast<FromDPDKDevice*>(e);
     bool ret = false;
 
-    for (int  iqueue = fd->queue_for_thisthread_begin(); iqueue <= fd->queue_for_thisthread_end(); iqueue++) {
-        ret |= fd->_run_task(iqueue);
-    }
-
-    #if HAVE_DPDK_INTERRUPT
-     if (!ret && fd->_rx_intr >= 0) {
-           for (int iqueue = fd->queue_for_thisthread_begin();
-                iqueue<=fd->queue_for_thisthread_end(); iqueue++) {
-               if (rte_eth_dev_rx_intr_enable(fd->_dev->port_id, iqueue) != 0) {
-                   click_chatter("Could not enable interrupts");
-                   t->fast_reschedule();
-                   return false;
-               }
-           }
-           struct rte_epoll_event event[fd->queue_per_threads];
-           int n, i;
-           uint8_t port_id, queue_id;
-           void *data;
-           n = rte_epoll_wait(RTE_EPOLL_PER_THREAD, event, fd->queue_per_threads, -1);
-           for (i = 0; i < n; i++) {
-                   data = event[i].epdata.data;
-                   port_id = ((uintptr_t)data) >> CHAR_BIT;
-                   assert(port_id == fd->_dev->port_id);
-           }
-           fd->selected(0, SELECT_READ);
-    }
-#endif
+    fd->_process_packets(NO_ASSIGNED_QUEUE);
 
     t->fast_reschedule();
     return ret;
@@ -573,24 +671,11 @@ bool FromDPDKDevice::multi_run_task(Task *t, void* e) {
 
 bool FromDPDKDevice::run_task(Task *t) {
     int iqueue = queue_for_thisthread_begin();
-    bool ret = _run_task(iqueue);
+    bool ret = _process_packets(iqueue);
 
     t->fast_reschedule();
     return ret;
 }
-
-#if HAVE_DPDK_INTERRUPT
-void FromDPDKDevice::selected(int fd, int mask) {
-    for (int iqueue = queue_for_thisthread_begin();
-            iqueue<=queue_for_thisthread_end(); iqueue++) {
-        if (rte_eth_dev_rx_intr_disable(_dev->port_id, iqueue) != 0) {
-            click_chatter("Could not disable interrupts");
-            return;
-        }
-    }
-    task_for_thread()->reschedule();
-}
-#endif
 
 ToDPDKDevice *
 FromDPDKDevice::find_output_element() {

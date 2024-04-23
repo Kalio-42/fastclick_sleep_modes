@@ -605,6 +605,10 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
     dev_conf.txmode.offloads = 0;
 #endif
 
+    if (info.rx_intr_enabled){
+        dev_conf.intr_conf.rxq = 1;
+    }
+
     if (info.mq_mode & ETH_MQ_RX_VMDQ_FLAG) {
 
         if (info.num_pools > dev_info.max_vmdq_pools) {
@@ -822,10 +826,11 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
     for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
         if (rte_eth_rx_queue_setup(
                 port_id, i, info.n_rx_descs, numa_node, &rx_conf,
-                _pktmbuf_pools[numa_node]) != 0)
+                _pktmbuf_pools[numa_node]) != 0) {
             return errh->error(
                 "Cannot initialize RX queue %u of port %u on node %u : %s",
                 i, port_id, numa_node, rte_strerror(rte_errno));
+        }
     }
 
     for (unsigned i = 0; i < (unsigned)info.tx_queues.size(); ++i)
@@ -881,6 +886,12 @@ also                ETH_TXQ_FLAGS_NOMULTMEMP
         rte_eth_promiscuous_enable(port_id);
     }
 
+    // Enable RX interrupts if requested 
+    if (info.rx_intr_enabled){
+        for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
+            rte_eth_dev_rx_intr_ctl_q(port_id, i, RTE_EPOLL_PER_THREAD, RTE_INTR_EVENT_ADD, (void *)((uintptr_t)port_id << CHAR_BIT | i));
+        }
+    }
     if (info.init_mac != EtherAddress()) {
         struct rte_ether_addr addr;
         memcpy(&addr, info.init_mac.data(), sizeof(struct rte_ether_addr));
