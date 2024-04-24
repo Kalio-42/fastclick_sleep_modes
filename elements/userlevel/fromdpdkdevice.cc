@@ -557,7 +557,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
     uint8_t end_queue = iqueue;
     uint8_t lcore_id = rte_lcore_id();
     // Metronome supposes that all queues are shared by all threads
-    if (_sleep_mode & SLEEP_HR || _sleep_mode & SLEEP_U) {
+    if ((_sleep_mode & SLEEP_HR || _sleep_mode & SLEEP_U) && _sleep_mode & SLEEP_POLICY_METRONOME) {
         start_queue = 0;
         end_queue = _nb_queues - 1;
     } else if (iqueue == NO_ASSIGNED_QUEUE){
@@ -627,6 +627,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
                 _rx_queue[end_queue - start_queue].idle_hint = power_idle_heuristic(
 						_rx_queue[end_queue - start_queue].zero_rx_packet_count);
             } else {
+                // printf("Packets received and sucessfully processed !\n");
                 _rx_queue[end_queue - start_queue].zero_rx_packet_count = 0;
             }
         }
