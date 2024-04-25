@@ -437,7 +437,7 @@ public:
 
 protected:
     static bool multi_run_task(Task *t, void* e);
-    inline bool _run_task(int iqueue);
+    inline bool _run_task(int iqueue, unsigned long *lock);
     static int reset_load_handler(
         const String &, Element *, void *, ErrorHandler *
     ) CLICK_COLD;
@@ -490,7 +490,7 @@ void turn_on_off_intr(bool on, uint8_t start_queue, uint8_t end_queue);
     struct lcore_rx_queue {
         uint32_t zero_rx_packet_count;
         uint32_t idle_hint;
-        unsigned long *lock;
+        unsigned long lock;
 
     } __rte_cache_aligned;
 

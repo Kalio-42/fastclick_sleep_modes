@@ -401,7 +401,7 @@ extern "C" {
 #endif
 
 inline CLICK_ALWAYS_INLINE bool
-FromDPDKDevice::_run_task(int iqueue)
+FromDPDKDevice::_run_task(int iqueue, unsigned long *lock)
 {
     struct rte_mbuf *pkts[_burst];
 
@@ -416,6 +416,10 @@ FromDPDKDevice::_run_task(int iqueue)
         unsigned n = rte_eth_rx_burst(_dev->port_id, iqueue, pkts, _burst);
 #endif
 
+    // If a lock was provided, unlock it after receiving packets
+    if (lock != NULL) {
+        *lock = UNLOCKED;
+    }
 
 	for (unsigned i = 0; i < n; ++i) {
 		unsigned char *data = rte_pktmbuf_mtod(pkts[i], unsigned char *);
@@ -570,7 +574,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
     if (!_sleep_mode) {
         bool ret = false;
         for (int queue = start_queue; queue <= end_queue; queue++) {
-            ret |= _run_task(queue);
+            ret |= _run_task(queue, NULL);
         }
         return ret;
     } else if (_sleep_mode & SLEEP_POLICY_METRONOME){    
@@ -580,9 +584,8 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
             if (!trylock(&_rx_queue[end_queue - start_queue].lock)){
                 continue;
             }
-            n += _run_task(i);
-            // Release the lock
-            _rx_queue[end_queue - start_queue].lock = UNLOCKED;
+            // _run_task will release the lock
+            n += _run_task(i, &_rx_queue[end_queue - start_queue].lock);
         } 
 
         if (unlikely(n == 0))
@@ -616,7 +619,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
     // Implements DPDK l3fwd-power example heuristics
         uint8_t total_rx = 0;
         for(uint8_t i = start_queue; i <= end_queue; i++) {
-            uint8_t n = _run_task(i);
+            uint8_t n = _run_task(i, NULL);
             _rx_queue[end_queue - start_queue].idle_hint = 0;
             total_rx += n;
             if (unlikely(n == 0)){
