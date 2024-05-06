@@ -104,6 +104,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
     bool has_reta_size;
     bool flow_isolate = false;
     unsigned sleep_delta;
+    unsigned sleep_max;
     String sleep_mode;
 #if HAVE_FLOW_API
     String flow_rules_filename;
@@ -137,7 +138,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         .read_or_set("BURST", _burst, 32)
         .read_or_set("CLEAR", _clear, false)
         .read_or_set("SLEEP_MODE", sleep_mode, "no_sleep")
-	.read_or_set("SLEEP_DELTA", sleep_delta, 2)
+	    .read_or_set("SLEEP_DELTA", sleep_delta, 2)
+        .read_or_set("SLEEP_MAX", sleep_max, 256)
         .read("PAUSE", fc_mode)
 #if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
         .read("IPCO", _ipco)
@@ -177,12 +179,15 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
             _sleep_mode |= SLEEP_POLICY_METRONOME;
         } else if (sleep_mode.find_left("power") != -1) {
             _sleep_mode |= SLEEP_POLICY_POWER;
+        } else if (sleep_mode.find_left("simple") != -1) {
+            _sleep_mode |= SLEEP_POLICY_SIMPLE;
         } else {
             return errh->error("Unknown policy %s", sleep_mode.c_str());
         }
 
         _sleep_delta = sleep_delta;
         _sleep_reset = sleep_delta;
+        _sleep_max = sleep_max;
         // If a sleep mode is set, maxqueues and minqueues must be equal
         if (minqueues != maxqueues) {
             return errh->error("When using a sleep mode, MINQUEUES and MAXQUEUES must be equal. Metronome synchronisation technique must know exactly how many queues are used.");
@@ -576,7 +581,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
             ret |= _run_task(queue, NULL);
         }
         return ret;
-    } else if (_sleep_mode & SLEEP_POLICY_METRONOME){    
+    } else if (_sleep_mode & SLEEP_POLICY_METRONOME){
     // Metronome default processing
         uint8_t n = 0;
         for(uint8_t i = start_queue; i <= end_queue; i++) {
@@ -597,6 +602,44 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
             } else if (_sleep_mode & SLEEP_ADD) {
                 time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
             }
+            if (time_sleep[iqueue] > _sleep_max)
+                time_sleep[iqueue] = _sleep_max;
+
+            // When the sleep time reaches a threshold, switch to interrupt mode
+            if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] > SUSPEND_THRESHOLD) {
+                // Triggers interrupts waiting
+                turn_on_off_intr(true, start_queue, end_queue);
+                sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
+                turn_on_off_intr(false, start_queue, end_queue);
+            } else if (_sleep_mode & SLEEP_U) {
+                // Utilisation du sleep de linux
+                usleep(time_sleep[iqueue]);
+            } else if (_sleep_mode & SLEEP_HR) {
+                // Utilisation du sleep de Metronome
+                hr_sleep(time_sleep[iqueue] * 1000);
+            }
+        } else {
+        // Remise à zéro du temps de sleep
+            time_sleep[iqueue]=_sleep_reset;
+	    }
+        return n;
+    } else if (_sleep_mode & SLEEP_POLICY_SIMPLE) {
+        // Simple default processing
+        uint8_t n = 0;
+
+        for (int queue = start_queue; queue <= end_queue; queue++) {
+            n |= _run_task(queue, NULL);
+        }
+        if (unlikely(n == 0))
+        {
+            if (_sleep_mode & SLEEP_MULT) {
+            // Gestion du facteur multiplicatif
+                time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
+            } else if (_sleep_mode & SLEEP_ADD) {
+                time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
+            }
+            if (time_sleep[iqueue] > _sleep_max)
+                time_sleep[iqueue] = _sleep_max;
 
             // When the sleep time reaches a threshold, switch to interrupt mode
             if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] > SUSPEND_THRESHOLD) {
@@ -617,7 +660,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
 	    }
         return n;
     } else if (_sleep_mode & SLEEP_POLICY_POWER){
-    // Implements DPDK l3fwd-power example heuristics
+        // Implements DPDK l3fwd-power example heuristics
         uint8_t total_rx = 0;
         for(uint8_t i = start_queue; i <= end_queue; i++) {
             uint8_t n = _run_task(i, NULL);
