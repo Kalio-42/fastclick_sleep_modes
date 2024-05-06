@@ -336,10 +336,9 @@ int FromDPDKDevice::initialize(ErrorHandler *errh) {
     if (ret != 0)
         return ret;
 
-    if (queue_share > 1)
+    if (queue_share > 1 && !(_sleep_mode & SLEEP_POLICY_METRONOME))
         return errh->error(
-            "Sharing queue between multiple threads is not "
-            "yet supported by FromDPDKDevice. "
+            "Sharing queue between multiple threads is only supported with Metronome policy"
             "Raise the number using N_QUEUES of queues or "
             "limit the number of threads using MAXTHREADS"
         );
@@ -586,6 +585,8 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
             }
             // _run_task will release the lock
             n += _run_task(i, &_rx_queue[end_queue - start_queue].lock);
+            // Release the lock
+            // _rx_queue[end_queue - start_queue].lock = UNLOCKED;
         } 
 
         if (unlikely(n == 0))
@@ -608,7 +609,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
                 usleep(time_sleep[iqueue]);
             } else if (_sleep_mode & SLEEP_HR) {
                 // Utilisation du sleep de Metronome
-                hr_sleep(time_sleep[iqueue] * 1000);
+                hr_sleep(20000);
             }
         } else {
         // Remise à zéro du temps de sleep
