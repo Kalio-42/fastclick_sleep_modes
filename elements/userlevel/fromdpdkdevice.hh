@@ -478,6 +478,7 @@ protected:
 #define SLEEP_INTR 32
 #define SLEEP_POLICY_METRONOME 64
 #define SLEEP_POLICY_POWER 128
+#define SLEEP_POLICY_SIMPLE 256
 #define LOCKED 1
 #define UNLOCKED 0
 
@@ -499,6 +500,7 @@ void turn_on_off_intr(bool on, uint8_t start_queue, uint8_t end_queue);
 
     unsigned _sleep_mode;
     unsigned _sleep_delta;
+    unsigned _sleep_max;
     unsigned _sleep_reset;
     unsigned _nb_queues;
     int time_sleep[24]={0}; // temps de sleep dynamique ; par défaut je suis obligé de définir la taille du tableau, je met donc à 24 qui est supérieur à nos tests, mais il faut augmenter la taille si l'on active plus de coeurs.
