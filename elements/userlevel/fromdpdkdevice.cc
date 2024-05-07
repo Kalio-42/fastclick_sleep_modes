@@ -160,27 +160,37 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
     if (sleep_mode != "no_sleep") {
         if (sleep_mode.find_left("mult") != -1) {
             _sleep_mode |= SLEEP_MULT;
+            click_chatter("Sleep mode : Mult");
         } else if (sleep_mode.find_left("add") != -1) {
             _sleep_mode |= SLEEP_ADD;
+            click_chatter("Sleep mode : Add");
         } else if (sleep_mode.find_left("constant") != -1) {
             _sleep_mode |= SLEEP_CST;
+            click_chatter("Sleep mode : constant");
         } else {
             return errh->error("Unknown mode %s", sleep_mode.c_str());
         }
 
+
         if (sleep_mode.find_left("hrsleep") != -1)
             _sleep_mode |= SLEEP_HR;
+            click_chatter("Sleep mode of sleep : hrsleep");
         if (sleep_mode.find_left("nanosleep") != -1)
             _sleep_mode |= SLEEP_U;
+            click_chatter("Sleep mode of sleep : nanosleep");
         if (sleep_mode.find_left("intr") != -1) {
             _sleep_mode |= SLEEP_INTR;
+            click_chatter("Sleep mode of sleep : interrupt");
         }
         if (sleep_mode.find_left("metronome") != -1) {
             _sleep_mode |= SLEEP_POLICY_METRONOME;
+            click_chatter("Sleep policy : metronome");
         } else if (sleep_mode.find_left("power") != -1) {
             _sleep_mode |= SLEEP_POLICY_POWER;
+            click_chatter("Sleep policy : power");
         } else if (sleep_mode.find_left("simple") != -1) {
             _sleep_mode |= SLEEP_POLICY_SIMPLE;
+            click_chatter("Sleep policy : simple");
         } else {
             return errh->error("Unknown policy %s", sleep_mode.c_str());
         }
@@ -204,8 +214,9 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
             _rx_queue[i].lock = UNLOCKED;
         }
         rte_spinlock_init(&_dev_lock);
-        // click_chatter("RESULT-SLEEP_MODE %u", _sleep_mode);
-    }
+        click_chatter("RESULT-SLEEP_VERIFY_MODE %u", _sleep_mode);
+    } else
+    click_chatter("No sleep mode");
 
     if (_use_numa) {
         numa_node = DPDKDevice::get_port_numa_node(_dev->port_id);
