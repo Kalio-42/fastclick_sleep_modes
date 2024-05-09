@@ -722,7 +722,7 @@ bool FromDPDKDevice::multi_run_task(Task *t, void* e) {
     FromDPDKDevice* fd = static_cast<FromDPDKDevice*>(e);
     bool ret = false;
 
-    fd->_process_packets(NO_ASSIGNED_QUEUE);
+    ret = fd->_process_packets(NO_ASSIGNED_QUEUE);
 
     t->fast_reschedule();
     return ret;

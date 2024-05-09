@@ -244,6 +244,12 @@ FromDevice::open_packet_socket(String ifname, ErrorHandler *errh)
     // nonblocking I/O on the packet socket so we can poll
     fcntl(fd, F_SETFL, O_NONBLOCK);
 
+    int opt = 1;
+    if (setsockopt(fd, SOL_PACKET, PACKET_QDISC_BYPASS, &opt, sizeof(opt)) < 0) {
+        errh->warning("Could not set QDISC_BYPASS");
+        return -1;
+    }
+
     return fd;
 }
 

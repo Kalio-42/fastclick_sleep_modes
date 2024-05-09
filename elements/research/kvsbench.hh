@@ -33,6 +33,7 @@ class KVSBench : public SimpleElement<KVSBench> {
         unsigned char* _array;
         unsigned _value_size;
         uint64_t _nb_keys;
+        int _offset;
         static std::random_device rd;
 };
 

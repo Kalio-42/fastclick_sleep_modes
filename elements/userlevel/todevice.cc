@@ -219,11 +219,12 @@ ToDevice::initialize(ErrorHandler *errh)
 #endif
 
     // check for duplicate writers
-    void *&used = router()->force_attachment("device_writer_" + _ifname);
+   /* void *&used = router()->force_attachment("device_writer_" + _ifname);
     if (used)
         return errh->error("duplicate writer for device %<%s%>", _ifname.c_str());
-    used = this;
 
+    used = this;
+*/
     ScheduleInfo::join_scheduler(this, &_task, errh);
     _signal = Notifier::upstream_empty_signal(this, 0, &_task);
     return 0;
