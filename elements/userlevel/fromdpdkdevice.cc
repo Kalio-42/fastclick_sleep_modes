@@ -105,6 +105,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
     bool flow_isolate = false;
     unsigned sleep_delta;
     unsigned sleep_max;
+    unsigned suspend_threshold;
     String sleep_mode;
 #if HAVE_FLOW_API
     String flow_rules_filename;
@@ -140,6 +141,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         .read_or_set("SLEEP_MODE", sleep_mode, "no_sleep")
 	    .read_or_set("SLEEP_DELTA", sleep_delta, 2)
         .read_or_set("SLEEP_MAX", sleep_max, 256)
+        .read_or_set("SUSPEND_THRESHOLD", suspend_threshold, 256)
         .read("PAUSE", fc_mode)
 #if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
         .read("IPCO", _ipco)
@@ -157,12 +159,24 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
     }
 
     _sleep_mode = 0;
+    _sleep_delta = sleep_delta;
+
+    _sleep_reset = sleep_delta;
+    _sleep_max = sleep_max;
+    if (_suspend_threshold > sleep_max)
+        return errh->error("Suspend threshold must be <= sleep max");
+
+    click_chatter("Sleep max %d/threshold %d", _sleep_max, _suspend_threshold);
     if (sleep_mode != "no_sleep") {
         if (sleep_mode.find_left("mult") != -1) {
             _sleep_mode |= SLEEP_MULT;
+            if (_sleep_delta <= 1)
+                return errh->error("Mult does not make sense with a sleep_delta smaller than 2");
             click_chatter("Sleep mode : Mult");
         } else if (sleep_mode.find_left("add") != -1) {
             _sleep_mode |= SLEEP_ADD;
+            if (_sleep_delta <= 0)
+                return errh->error("Add sleep mode must have a delta bigger than 0, else it's constant.");
             click_chatter("Sleep mode : Add");
         } else if (sleep_mode.find_left("constant") != -1) {
             _sleep_mode |= SLEEP_CST;
@@ -172,14 +186,18 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
         }
 
 
-        if (sleep_mode.find_left("hrsleep") != -1)
+        if (sleep_mode.find_left("hrsleep") != -1) {
             _sleep_mode |= SLEEP_HR;
             click_chatter("Sleep mode of sleep : hrsleep");
-        if (sleep_mode.find_left("nanosleep") != -1)
+        }
+        if (sleep_mode.find_left("nanosleep") != -1 || sleep_mode.find_left("usleep") != -1) {
             _sleep_mode |= SLEEP_U;
             click_chatter("Sleep mode of sleep : nanosleep");
+        }
         if (sleep_mode.find_left("intr") != -1) {
             _sleep_mode |= SLEEP_INTR;
+            if ((_sleep_mode & SLEEP_CST))
+                return errh->error("Interrupt cannot be contant, we need to hit the threshold. Use add (or mult).");
             click_chatter("Sleep mode of sleep : interrupt");
         }
         if (sleep_mode.find_left("metronome") != -1) {
@@ -187,6 +205,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
             click_chatter("Sleep policy : metronome");
         } else if (sleep_mode.find_left("power") != -1) {
             _sleep_mode |= SLEEP_POLICY_POWER;
+            if (!(_sleep_mode & SLEEP_CST))
+                return errh->error("Power does not support anything else than constant");
             click_chatter("Sleep policy : power");
         } else if (sleep_mode.find_left("simple") != -1) {
             _sleep_mode |= SLEEP_POLICY_SIMPLE;
@@ -195,9 +215,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
             return errh->error("Unknown policy %s", sleep_mode.c_str());
         }
 
-        _sleep_delta = sleep_delta;
-        _sleep_reset = sleep_delta;
-        _sleep_max = sleep_max;
+
         // If a sleep mode is set, maxqueues and minqueues must be equal
         if (minqueues != maxqueues) {
             return errh->error("When using a sleep mode, MINQUEUES and MAXQUEUES must be equal. Metronome synchronisation technique must know exactly how many queues are used.");
@@ -212,12 +230,14 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh) {
             _rx_queue[i].zero_rx_packet_count = 0;
             _rx_queue[i].idle_hint = 0;
             _rx_queue[i].lock = UNLOCKED;
+            _rx_queue[i].n_irq_wakeups = 0;
         }
         rte_spinlock_init(&_dev_lock);
         click_chatter("RESULT-SLEEP_VERIFY_MODE %u", _sleep_mode);
-    } else
-    click_chatter("No sleep mode");
-
+    } else {
+        _rx_queue = 0;
+        click_chatter("No sleep mode");
+    }
     if (_use_numa) {
         numa_node = DPDKDevice::get_port_numa_node(_dev->port_id);
         if (_numa_node_override > -1)
@@ -378,6 +398,7 @@ int FromDPDKDevice::initialize(ErrorHandler *errh) {
     }
 
     if (_sleep_mode & SLEEP_INTR) {
+        click_chatter("Enabling interrupts");
         _dev->info.rx_intr_enabled = 1;
     }
 
@@ -545,30 +566,33 @@ static int sleep_until_rx_interrupt(int num, int lcore) {
 		port_id = ((uintptr_t)data) >> CHAR_BIT;
 		queue_id = ((uintptr_t)data) &
 			RTE_LEN2MASK(CHAR_BIT, uint8_t);
-		click_chatter(
+		/*click_chatter(
 			"lcore %u is waked up from rx interrupt on"
 			" port %d queue %d\n",
-			rte_lcore_id(), port_id, queue_id);
+			rte_lcore_id(), port_id, queue_id);*/
 	}
 	status[lcore].wakeup = n != 0;
+
+
 
 	return 0;
 }
 
-static inline uint32_t
-power_idle_heuristic(uint32_t zero_rx_packet_count)
+inline uint32_t
+FromDPDKDevice::power_idle_heuristic(uint32_t zero_rx_packet_count)
 {
 	/* If zero count is less than 100,  sleep 1us */
-	if (zero_rx_packet_count < SUSPEND_THRESHOLD)
+	if (zero_rx_packet_count < _suspend_threshold)
 		return MINIMUM_SLEEP_TIME;
 	/* If zero count is less than 1000, sleep 100 us which is the
 		minimum latency switching from C3/C6 to C0
 	*/
 	else
-		return SUSPEND_THRESHOLD;
+		return _suspend_threshold;
 }
 
-bool FromDPDKDevice::_process_packets(uint8_t iqueue){
+inline
+bool FromDPDKDevice::_process_packets(uint8_t iqueue) {
     // First, define on which queue we will iterate
 
     // By default, iterate on a single queue given by iqueue
@@ -593,7 +617,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
         }
         return ret;
     } else if (_sleep_mode & SLEEP_POLICY_METRONOME){
-    // Metronome default processing
+        // Metronome default processing
         uint8_t n = 0;
         for(uint8_t i = start_queue; i <= end_queue; i++) {
             if (!trylock(&_rx_queue[end_queue - start_queue].lock)){
@@ -610,18 +634,21 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
             if (_sleep_mode & SLEEP_MULT) {
             // Gestion du facteur multiplicatif
                 time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
+                if (time_sleep[iqueue] > _sleep_max)
+                    time_sleep[iqueue] = _sleep_max;
             } else if (_sleep_mode & SLEEP_ADD) {
                 time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
+                if (time_sleep[iqueue] > _sleep_max)
+                    time_sleep[iqueue] = _sleep_max;
             }
-            if (time_sleep[iqueue] > _sleep_max)
-                time_sleep[iqueue] = _sleep_max;
 
             // When the sleep time reaches a threshold, switch to interrupt mode
-            if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] > SUSPEND_THRESHOLD) {
-                // Triggers interrupts waiting
-                turn_on_off_intr(true, start_queue, end_queue);
-                sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
-                turn_on_off_intr(false, start_queue, end_queue);
+            if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] >= _suspend_threshold) {
+                    // Triggers interrupts waiting
+                    turn_on_off_intr(true, start_queue, end_queue);
+                    sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
+                    _rx_queue[lcore_id].n_irq_wakeups++;
+                    turn_on_off_intr(false, start_queue, end_queue);
             } else if (_sleep_mode & SLEEP_U) {
                 // Utilisation du sleep de linux
                 usleep(time_sleep[iqueue]);
@@ -646,24 +673,32 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
             if (_sleep_mode & SLEEP_MULT) {
             // Gestion du facteur multiplicatif
                 time_sleep[iqueue] = time_sleep[iqueue] * _sleep_delta;
+                if (time_sleep[iqueue] > _sleep_max)
+                    time_sleep[iqueue] = _sleep_max;
             } else if (_sleep_mode & SLEEP_ADD) {
                 time_sleep[iqueue] = time_sleep[iqueue] + _sleep_delta;
+                if (time_sleep[iqueue] > _sleep_max)
+                    time_sleep[iqueue] = _sleep_max;
             }
-            if (time_sleep[iqueue] > _sleep_max)
-                time_sleep[iqueue] = _sleep_max;
+            static int max = 0;
+            if (time_sleep[iqueue] > max) {
+                max = time_sleep[iqueue];
+                click_chatter("%d",time_sleep[iqueue]);
+            }
 
             // When the sleep time reaches a threshold, switch to interrupt mode
-            if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] > SUSPEND_THRESHOLD) {
+            if (_sleep_mode & SLEEP_INTR && time_sleep[iqueue] >= _suspend_threshold) {
                 // Triggers interrupts waiting
                 turn_on_off_intr(true, start_queue, end_queue);
                 sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
+                _rx_queue[lcore_id].n_irq_wakeups++;
                 turn_on_off_intr(false, start_queue, end_queue);
             } else if (_sleep_mode & SLEEP_U) {
                 // Utilisation du sleep de linux
                 usleep(time_sleep[iqueue]);
             } else if (_sleep_mode & SLEEP_HR) {
                 // Utilisation du sleep de Metronome
-                hr_sleep(20000);
+                hr_sleep(time_sleep[iqueue] * 1000);
             }
         } else {
         // Remise à zéro du temps de sleep
@@ -698,7 +733,7 @@ bool FromDPDKDevice::_process_packets(uint8_t iqueue){
                     min_idle_hint = _rx_queue[end_queue - start_queue].idle_hint;
             }
             // Over a threshold, rely on interrupts instead of sleeping
-            if (min_idle_hint > SUSPEND_THRESHOLD) {
+            if (min_idle_hint > _suspend_threshold) {
                 turn_on_off_intr(true, start_queue, end_queue);
                 sleep_until_rx_interrupt(end_queue - start_queue + 1, lcore_id);
                 turn_on_off_intr(false, start_queue, end_queue);
@@ -752,6 +787,7 @@ enum {
     h_ipackets, h_ibytes, h_imissed, h_ierrors, h_nombufs,
     h_stats_packets, h_stats_bytes,
     h_active, h_safe_active,
+    h_irq,
     h_xstats, h_queue_count,
     h_nb_rx_queues, h_nb_tx_queues, h_nb_vf_pools,
     h_rss, h_rss_reta, h_rss_reta_size,
@@ -781,6 +817,15 @@ String FromDPDKDevice::read_handler(Element *e, void * thunk)
                   return "undefined";
               else
                   return String((int) fd->_dev->port_id);
+        case h_irq:  {
+            unsigned long tot = 0;
+            if (fd->_rx_queue) {
+                for (int i = 0; i < fd->_nb_queues; i++) {
+                    tot += fd->_rx_queue[i].n_irq_wakeups;
+                }
+            }
+            return String(tot);
+        }
         case h_nb_rx_queues:
             return String(fd->_dev->nb_rx_queues());
         case h_nb_tx_queues:
@@ -1220,6 +1265,7 @@ void FromDPDKDevice::add_handlers()
     add_write_handler("safe_active", write_handler, h_safe_active);
     add_read_handler("count", count_handler, h_count);
     add_write_handler("reset_counts", reset_count_handler, 0, Handler::BUTTON);
+    add_read_handler("nb_irq_wakeups", read_handler, h_irq);
 
     add_read_handler("nb_rx_queues",read_handler, h_nb_rx_queues);
     add_read_handler("nb_tx_queues",read_handler, h_nb_tx_queues);

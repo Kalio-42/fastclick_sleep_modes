@@ -454,7 +454,7 @@ protected:
     static String statistics_handler(Element *e, void *thunk) CLICK_COLD;
     static int xstats_handler(int operation, String &input, Element *e,
                               const Handler *handler, ErrorHandler *errh);
-
+    uint32_t power_idle_heuristic(uint32_t zero_rx_packet_count);
     #define NO_ASSIGNED_QUEUE 255
     bool _process_packets(uint8_t iqueue);
 
@@ -485,13 +485,13 @@ protected:
 void turn_on_off_intr(bool on, uint8_t start_queue, uint8_t end_queue);
 
 #define MINIMUM_SLEEP_TIME  1
-#define SUSPEND_THRESHOLD   300
 #define MIN_ZERO_POLL_COUNT 10
 
     struct lcore_rx_queue {
         uint32_t zero_rx_packet_count;
         uint32_t idle_hint;
         unsigned long lock;
+        unsigned long n_irq_wakeups;
 
     } __rte_cache_aligned;
 
@@ -502,6 +502,7 @@ void turn_on_off_intr(bool on, uint8_t start_queue, uint8_t end_queue);
     unsigned _sleep_delta;
     unsigned _sleep_max;
     unsigned _sleep_reset;
+    unsigned _suspend_threshold;
     unsigned _nb_queues;
     int time_sleep[24]={0}; // temps de sleep dynamique ; par défaut je suis obligé de définir la taille du tableau, je met donc à 24 qui est supérieur à nos tests, mais il faut augmenter la taille si l'on active plus de coeurs.
 };
